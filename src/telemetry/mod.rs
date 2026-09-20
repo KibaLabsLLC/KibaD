@@ -13,11 +13,16 @@ mod collectors;
 mod consent;
 mod uplink;
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How often a report is built and sent. Coarse on purpose — this is
 /// trend data, not monitoring.
 const REPORT_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60); // 6 h
+
+/// Where the install salt lived before it moved to the per-user data dir.
+/// Still read (never written) so existing installs keep their pseudonymous ID.
+const LEGACY_SALT_PATH: &str = "/var/lib/kibad/telemetry-salt";
 
 /// Entry point called from `main.rs`. Safe to call unconditionally;
 /// the consent check inside decides whether anything actually runs.
@@ -66,21 +71,58 @@ fn current_period_label() -> String {
     format!("{}", secs / 86_400)
 }
 
-fn load_or_create_install_salt() -> String {
-    const SALT_PATH: &str = "/var/lib/kibad/telemetry-salt";
+/// `$XDG_DATA_HOME/kibad/telemetry-salt`, or `~/.local/share/kibad/telemetry-salt`.
+fn salt_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".local/share"))
+        })?;
+    Some(base.join("kibad").join("telemetry-salt"))
+}
 
-    if let Ok(existing) = std::fs::read_to_string(SALT_PATH) {
-        let trimmed = existing.trim().to_string();
-        if !trimmed.is_empty() {
-            return trimmed;
-        }
+fn read_salt(path: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+fn persist_salt(path: &Path, salt: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(salt.as_bytes())
+}
+
+fn load_or_create_install_salt() -> String {
+    let Some(path) = salt_path() else {
+        tracing::warn!("telemetry: no HOME or XDG_DATA_HOME, install salt won't persist");
+        return generate_salt();
+    };
+
+    // New location first, then the legacy system path.
+    if let Some(existing) = read_salt(&path).or_else(|| read_salt(Path::new(LEGACY_SALT_PATH))) {
+        return existing;
     }
 
     let salt = generate_salt();
-    if let Some(parent) = std::path::Path::new(SALT_PATH).parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Err(e) = persist_salt(&path, &salt) {
+        tracing::warn!(
+            "telemetry: couldn't save install salt to {}: {e}",
+            path.display()
+        );
     }
-    let _ = std::fs::write(SALT_PATH, &salt);
     salt
 }
 
