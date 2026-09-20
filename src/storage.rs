@@ -11,18 +11,51 @@
 //! serialized as JSON in a single column. We are not trying to build a
 //! queryable analytics schema here — the model itself is small, and JSON
 //! keeps this file free of migration pain as `WidgetModel`'s shape evolves.
+//!
+//! Location: per-user, under `$XDG_DATA_HOME/kibad/UI.dat`, falling back to
+//! `~/.local/share/kibad/UI.dat`. See [`Store::default_path`].
 
 use crate::bandit::WidgetModel;
 use crate::types::WidgetKey;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS widgets (
+    fingerprint INTEGER PRIMARY KEY,
+    app_id      TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    tree_path   TEXT NOT NULL,
+    model_json  TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);";
 
 pub struct Store {
     conn: Connection,
 }
 
 impl Store {
+    /// Default location of UI.dat: `$XDG_DATA_HOME/kibad/UI.dat`, or
+    /// `~/.local/share/kibad/UI.dat` when `XDG_DATA_HOME` is unset or empty.
+    pub fn default_path() -> Result<PathBuf> {
+        let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                let home = std::env::var_os("HOME")
+                    .filter(|v| !v.is_empty())
+                    .context("neither XDG_DATA_HOME nor HOME is set")?;
+                PathBuf::from(home).join(".local/share")
+            }
+        };
+        Ok(base.join("kibad").join("UI.dat"))
+    }
+
+    /// Opens UI.dat at the per-user default location.
+    pub fn open_default() -> Result<Self> {
+        Self::open(Self::default_path()?)
+    }
+
     /// Opens (creating if needed) the UI.dat database at the given path,
     /// and makes sure its schema exists.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -33,18 +66,10 @@ impl Store {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening sqlite db at {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS widgets (
-                fingerprint INTEGER PRIMARY KEY,
-                app_id      TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                label       TEXT NOT NULL,
-                tree_path   TEXT NOT NULL,
-                model_json  TEXT NOT NULL,
-                updated_at  INTEGER NOT NULL
-            );",
-        )?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| format!("enabling WAL on {}", path.display()))?;
+        conn.execute_batch(SCHEMA)
+            .with_context(|| format!("creating schema in {}", path.display()))?;
         Ok(Self { conn })
     }
 
@@ -52,17 +77,7 @@ impl Store {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(
-            "CREATE TABLE widgets (
-                fingerprint INTEGER PRIMARY KEY,
-                app_id      TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                label       TEXT NOT NULL,
-                tree_path   TEXT NOT NULL,
-                model_json  TEXT NOT NULL,
-                updated_at  INTEGER NOT NULL
-            );",
-        )?;
+        conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
 
@@ -137,5 +152,11 @@ mod tests {
         let loaded = store.load_all().unwrap();
         assert_eq!(loaded.len(), 1, "same widget key must upsert, not duplicate");
         assert_eq!(loaded[0].1.total_samples, 99);
+    }
+
+    #[test]
+    fn default_path_lives_under_kibad_dir() {
+        let path = Store::default_path().unwrap();
+        assert!(path.ends_with("kibad/UI.dat"));
     }
 }
