@@ -8,18 +8,23 @@
 //!      worth preserving even though it makes the implementation less
 //!      "real-time".
 //!   2. Every payload that goes out is first appended, verbatim, to a
-//!      local plaintext log the user can read with `journalctl` or `cat`.
+//!      local plaintext log the user can read with `cat`.
 //!      If it's not safe for the user to see, it's not safe to send.
+//!      If the log can't be written, nothing is sent.
+//!
+//! The log lives in the per-user state dir:
+//! `$XDG_STATE_HOME/kibad/telemetry-outbound.log`, or
+//! `~/.local/state/kibad/telemetry-outbound.log`.
 
 use super::aggregate::AggregatedReport;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::Write;
+use std::path::PathBuf;
 
-const OUTBOUND_LOG_PATH: &str = "/var/log/kibad/telemetry-outbound.log";
 const UPLOAD_ENDPOINT: &str = "https://api.hookbase.app/ingest/remi-mixo-1171db02/telemetry";
 
 pub fn send_report(report: &AggregatedReport) -> Result<()> {
-    let body = serde_json::to_string(report)?;
+    let body = serde_json::to_string(report).context("serializing telemetry report")?;
 
     log_outbound(&body)?;
 
@@ -33,23 +38,46 @@ pub fn send_report(report: &AggregatedReport) -> Result<()> {
     client
         .post(UPLOAD_ENDPOINT)
         .set("Content-Type", "application/json")
-        .send_string(&body)?;
+        .send_string(&body)
+        .context("posting telemetry report to uplink endpoint")?;
 
     Ok(())
 }
 
+/// `$XDG_STATE_HOME/kibad/telemetry-outbound.log`, falling back to
+/// `~/.local/state/kibad/telemetry-outbound.log`.
+fn outbound_log_path() -> Result<PathBuf> {
+    let base = match std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let home = std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .context("neither XDG_STATE_HOME nor HOME is set")?;
+            PathBuf::from(home).join(".local/state")
+        }
+    };
+    Ok(base.join("kibad").join("telemetry-outbound.log"))
+}
+
 fn log_outbound(body: &str) -> Result<()> {
-    if let Some(parent) = std::path::Path::new(OUTBOUND_LOG_PATH).parent() {
-        std::fs::create_dir_all(parent)?;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = outbound_log_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating outbound log dir {}", parent.display()))?;
     }
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(OUTBOUND_LOG_PATH)?;
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("opening outbound log {}", path.display()))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    writeln!(f, "[{ts}] {body}")?;
+    writeln!(f, "[{ts}] {body}")
+        .with_context(|| format!("writing outbound log {}", path.display()))?;
     Ok(())
 }
