@@ -1,0 +1,42 @@
+[package]
+name = "kibad"
+version = "0.1.0"
+edition = "2021"
+description = "KibaD -- adaptive UI element relocation daemon for KibaOS (Latent App GUI)"
+
+[[bin]]
+name = "kibad"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"
+rand = { version = "0.8", features = ["std_rng"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dbus = { version = "0.9.12", features = ["vendored"] }
+input = { version = "=0.9.1", features = ["udev"] }
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "=0.3.10", features = ["client", "wayland-client"] }
+libc = "0.2.189"
+memmap2 = "0.9.11"
+rustix = { version = "1.1.5", features = ["fs", "mm"] }
+sha2 = "0.10"
+hex = "0.4"
+ureq = { version = "2", features = ["tls"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+
+[dependencies.wayland-protocols]
+version = "=0.32.12"
+
+[dependencies.wayland-scanner]
+version = "=0.31.10"
+
+[dependencies.quick-xml]
+version = "=0.39.4"
