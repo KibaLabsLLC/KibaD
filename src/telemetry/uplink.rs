@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::PathBuf;
 
-const UPLOAD_ENDPOINT: &str = "https://api.hookbase.app/ingest/remi-mixo-1171db02/telemetry";
+const UPLOAD_ENDPOINT: &str = "https://telemetry.blooper-it.workers.dev/v1/report";
 
 pub fn send_report(report: &AggregatedReport) -> Result<()> {
     let body = serde_json::to_string(report).context("serializing telemetry report")?;
